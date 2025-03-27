@@ -1442,6 +1442,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bincode",
+ "celestia-proto 0.7.0",
  "celestia-rpc",
  "celestia-types 0.10.0",
  "dotenv",

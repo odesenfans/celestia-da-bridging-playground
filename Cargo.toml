@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.97"
-celestia-types = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
+celestia-proto = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
 celestia-rpc = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
+celestia-types = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
 dotenv = "0.15.0"
 serde_json = "1.0.140"
 tokio = { version = "1.44.1", features = ["full", "rt-multi-thread"] }
