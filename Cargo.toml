@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.97"
-celestia-rpc = { git = "https://github.com/Ferret-san/lumina.git" }
-celestia-types = { git = "https://github.com/Ferret-san/lumina.git" }
+celestia-types = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
+celestia-rpc = {git = "https://github.com/Eclipse-Laboratories-Inc/lumina", rev = "81da538d2b76933f8d692b2f52946ead3255f22b" }
 dotenv = "0.15.0"
 serde_json = "1.0.140"
 tokio = { version = "1.44.1", features = ["full", "rt-multi-thread"] }
@@ -20,3 +20,6 @@ serde = { version = "1.0.219", features = ["derive"] }
 bincode = "1.3"
 alloy-trie = "0.7.9"
 alloy-contract = "0.12.6"
+hana-blobstream = { path="../../../git/celestia/hana/crates/blobstream" }
+hana-proofs = { path="../../../git/celestia/hana/crates/proofs" }
+env_logger = "0.11.7"
