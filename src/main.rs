@@ -1,5 +1,5 @@
 use alloy_provider::RootProvider;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use base64::Engine;
 use celestia_proto::shwap::Row as RawRow;
 use celestia_rpc::share::{GetRowResponse, RowSide};
@@ -8,9 +8,11 @@ use celestia_types::nmt::{Namespace, Nmt};
 use celestia_types::row::{Row, RowId};
 use celestia_types::{Commitment, ExtendedHeader, RawShare, Share};
 use dotenv::dotenv;
-use hana_proofs::blobstream_inclusion::get_blobstream_proof;
+use hana_proofs::blobstream_inclusion::{find_data_commitment, get_blobstream_proof};
 use std::collections::HashMap;
 use std::env;
+use celestia_rpc::blobstream::BlobstreamClient;
+use hana_blobstream::blobstream::encode_data_root_tuple;
 use tracing::log;
 
 // const CELESTIA_BLOCK_HEIGHT: u64 = 4556941;
@@ -25,14 +27,23 @@ fn decode_commitment(b64: &str) -> Result<Commitment, anyhow::Error> {
     Ok(Commitment::new(array))
 }
 
+struct RowsWithNamespace {
+    start_index: u16,
+    rows: Vec<GetRowResponse>,
+}
+
 /// Returns all rows containing shares from a specific namespace in the EDS.
-async fn get_rows_with_namespace(client: &CelestiaClient, header: &ExtendedHeader, namespace: Namespace) -> Result<HashMap<u64, GetRowResponse>, anyhow::Error> {
-    let mut rows = HashMap::new();
-    let mut row_index = 0;
+async fn get_rows_with_namespace(
+    client: &CelestiaClient,
+    header: &ExtendedHeader,
+    namespace: Namespace,
+) -> Result<RowsWithNamespace, anyhow::Error> {
+    let mut rows = vec![];
+    let mut row_index = 0u16;
 
     loop {
         log::debug!("fetching row #{}", row_index);
-        let row = client.share_get_row(header, row_index).await?;
+        let row = client.share_get_row(header, row_index as u64).await?;
 
         let last_share_in_row = row.shares.last().unwrap();
         let last_namespace_in_row = last_share_in_row.namespace();
@@ -43,7 +54,7 @@ async fn get_rows_with_namespace(client: &CelestiaClient, header: &ExtendedHeade
             continue;
         }
 
-        rows.insert(row_index, row);
+        rows.push(row);
         row_index += 1;
 
         if last_namespace_in_row > namespace {
@@ -51,21 +62,33 @@ async fn get_rows_with_namespace(client: &CelestiaClient, header: &ExtendedHeade
         }
     }
 
-    Ok(rows)
+    Ok(RowsWithNamespace {
+        start_index: row_index - rows.len() as u16,
+        rows,
+    })
 }
 
 // TODO: implement a ad-hoc method in celestia_types::Row
-fn row_from_get_row_response(row_index: u16, row_response: GetRowResponse) -> Result<Row, celestia_types::Error> {
+fn row_from_get_row_response(
+    row_index: u16,
+    row_response: GetRowResponse,
+) -> Result<Row, celestia_types::Error> {
     let row_id = RowId::new(row_index, row_response.shares.len() as u64)?;
 
-    let raw_shares = row_response.shares.into_iter().map(RawShare::from).collect();
+    let raw_shares = row_response
+        .shares
+        .into_iter()
+        .map(RawShare::from)
+        .collect();
 
     let raw_row = RawRow {
         shares_half: raw_shares,
         half_side: match row_response.side {
-            RowSide::Left => { 0 }
-            RowSide::Right => { 1 }
-            RowSide::Both => { panic!("Both sides, now that's unexpected") }
+            RowSide::Left => 0,
+            RowSide::Right => 1,
+            RowSide::Both => {
+                panic!("Both sides, now that's unexpected")
+            }
         },
     };
     Row::from_raw(row_id, raw_row)
@@ -76,20 +99,49 @@ async fn main() -> Result<(), anyhow::Error> {
     env_logger::init();
     dotenv().ok();
 
-    let blobstream_address = alloy_primitives::address!("0x7Cf3876F681Dbb6EdA8f6FfC45D66B996Df08fAe");
+    let blobstream_address =
+        alloy_primitives::address!("0x7Cf3876F681Dbb6EdA8f6FfC45D66B996Df08fAe");
 
     let block_height = CELESTIA_BLOCK_HEIGHT;
     let namespace = Namespace::new_v0(&NAMESPACE)?;
     let blob_commitment: Commitment = decode_commitment(BLOB_COMMITMENT)?;
 
-    let celestia_full_node_rpc_url = env::var("CELESTIA_FULL_NODE_RPC_URL").with_context(|| "CELESTIA_FULL_NODE_RPC_URL must be set")?;
-    let celestia_client = CelestiaClient::new(&celestia_full_node_rpc_url, None).await.with_context(|| "Failed to create Celestia client")?;
+    let celestia_full_node_rpc_url = env::var("CELESTIA_FULL_NODE_RPC_URL")
+        .with_context(|| "CELESTIA_FULL_NODE_RPC_URL must be set")?;
+    let celestia_client = CelestiaClient::new(&celestia_full_node_rpc_url, None)
+        .await
+        .with_context(|| "Failed to create Celestia client")?;
 
     let header = celestia_client.header_get_by_height(block_height).await?;
 
-    let pfb_rows = get_rows_with_namespace(&celestia_client, &header, Namespace::PAY_FOR_BLOB).await?;
-    for (i, row) in pfb_rows.iter() {
-        println!("Row #{i}: side {:?} - n_shares: {} - namespaces: [{:?}, {:?}]", row.side, row.shares.len(), row.shares[0].namespace(), row.shares[row.shares.len() - 1].namespace());
+    let ethereum_rpc_url = env::var("ETHEREUM_RPC_URL").with_context(|| "ETHEREUM_RPC_URL must be set")?;
+    let l1_provider = RootProvider::connect(&ethereum_rpc_url).await?;
+
+    let blobstream_event = find_data_commitment(block_height, blobstream_address, &l1_provider).await.unwrap();
+
+    let data_root_proof = celestia_client
+        .blobstream_get_data_root_tuple_inclusion_proof(block_height, blobstream_event.start_block, blobstream_event.end_block)
+        .await?;
+
+    let encoded_data_root_tuple = encode_data_root_tuple(block_height, &header.dah.hash());
+
+    data_root_proof
+        .verify(encoded_data_root_tuple, *blobstream_event.data_commitment.clone())
+        .expect("failed to verify data root tuple inclusion proof");
+
+    let RowsWithNamespace {
+        start_index,
+        rows: pfb_rows,
+    } = get_rows_with_namespace(&celestia_client, &header, Namespace::PAY_FOR_BLOB).await?;
+    for (i, row) in pfb_rows.iter().enumerate() {
+        println!(
+            "Row #{}: side {:?} - n_shares: {} - namespaces: [{:?}, {:?}]",
+            start_index + i as u16,
+            row.side,
+            row.shares.len(),
+            row.shares[0].namespace(),
+            row.shares[row.shares.len() - 1].namespace()
+        );
 
         let mut data = 0;
         let mut parity = 0;
@@ -104,20 +156,22 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("Parity: {} - data: {}", parity, data);
     }
 
-    let start_index = *pfb_rows.keys().min().unwrap() as u16;
-    let extended_rows = pfb_rows.into_iter().map(|(index, row_response)| row_from_get_row_response(index as u16, row_response));
+    let extended_rows = pfb_rows
+        .into_iter()
+        .enumerate()
+        .map(|(offset, row_response)| {
+            row_from_get_row_response(start_index + offset as u16, row_response)
+        });
 
     let mut index = start_index;
     for row in extended_rows {
         let row = row?;
         let row_id = RowId::new(index, (row.shares.len() / 2) as u64)?;
-        row.verify(row_id, &header.dah).with_context(|| format!("Verifying NMT root of row {:?}", row_id))?;
+        row.verify(row_id, &header.dah)
+            .with_context(|| format!("Verifying NMT root of row {:?}", row_id))?;
         index += 1;
     }
 
-
-    // let ethereum_rpc_url = env::var("ETHEREUM_RPC_URL").with_context(|| "ETHEREUM_RPC_URL must be set")?;
-    // let l1_provider = RootProvider::connect(&ethereum_rpc_url).await?;
     //
     // let blob = celestia_client.blob_get(block_height, namespace, blob_commitment).await.with_context(|| "Failed to retrieve blob")?;
     //
